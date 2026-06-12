@@ -1,0 +1,138 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-heading: 'Outfit', system-ui, -apple-system, sans-serif;
+
+  --color-cyber-purple: #9ca3af; /* Silver gray */
+  --color-cyber-blue: #d1d5db; /* Light gray */
+  --color-cyber-emerald: #e5e7eb; /* Cool silver */
+  --color-cyber-rose: #374151; /* Dark charcoal */
+  --color-cyber-amber: #4b5563; /* Medium gray */
+
+  --animate-pulse-glow: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-slide-up: slide-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-spark-1: spark-1 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-spark-2: spark-2 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-spark-3: spark-3 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-spark-4: spark-4 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+
+  @keyframes pulse-glow {
+    0%, 100% {
+      opacity: 1;
+      filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.15)) drop-shadow(0 0 10px rgba(255, 255, 255, 0.05));
+    }
+    50% {
+      opacity: 0.8;
+      filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.3)) drop-shadow(0 0 20px rgba(255, 255, 255, 0.1));
+    }
+  }
+
+  @keyframes slide-up {
+    0% {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes spark-1 {
+    0% { transform: translate(0, 0) scale(1); opacity: 1; }
+    100% { transform: translate(-30px, -30px) scale(0); opacity: 0; }
+  }
+  @keyframes spark-2 {
+    0% { transform: translate(0, 0) scale(1); opacity: 1; }
+    100% { transform: translate(30px, -30px) scale(0); opacity: 0; }
+  }
+  @keyframes spark-3 {
+    0% { transform: translate(0, 0) scale(1); opacity: 1; }
+    100% { transform: translate(-20px, 30px) scale(0); opacity: 0; }
+  }
+  @keyframes spark-4 {
+    0% { transform: translate(0, 0) scale(1); opacity: 1; }
+    100% { transform: translate(20px, 30px) scale(0); opacity: 0; }
+  }
+}
+
+:root {
+  background-color: #000000;
+  color: #e5e7eb;
+  font-family: var(--font-sans);
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Glassmorphism Styles (Black & Grey Theme) */
+.glass-card {
+  background: rgba(15, 15, 15, 0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-card-hover:hover {
+  background: rgba(20, 20, 20, 0.85);
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 10px 40px 0 rgba(255, 255, 255, 0.04);
+  transform: translateY(-2px);
+}
+
+.glass-input {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-input:focus {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 0 15px rgba(255, 255, 255, 0.06);
+  outline: none;
+}
+
+/* Hide standard styling of default root wrapper in Vite */
+#root {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  border: none !important;
+  text-align: left !important;
+  padding: 0 !important;
+  min-height: 100vh !important;
+  display: block !important;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  background-color: #000000;
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, #ffffff 0%, #a1a1aa 50%, #3f3f46 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
