@@ -219,10 +219,18 @@ export default function App() {
     return () => clearInterval(timer)
   }, [])
 
-  // Header Scroll Listener
+  // Header Scroll Listener with Hysteresis to prevent jitter/flickering
   useEffect(() => {
+    let scrolled = false
     const handleScroll = () => {
-      setIsScrolled(window.scrollY > 45)
+      const sy = window.scrollY
+      if (!scrolled && sy > 50) {
+        scrolled = true
+        setIsScrolled(true)
+      } else if (scrolled && sy < 20) {
+        scrolled = false
+        setIsScrolled(false)
+      }
     }
     window.addEventListener('scroll', handleScroll)
     handleScroll()
@@ -707,10 +715,10 @@ export default function App() {
 
       {/* --- APPLICATION HEADER --- */}
       <header
-        className={`fixed left-1/2 -translate-x-1/2 z-40 transition-all duration-500 ease-in-out flex flex-row items-center justify-between gap-4 ${
+        className={`fixed left-1/2 -translate-x-1/2 z-40 transition-all duration-500 ease-out flex flex-row items-center justify-between gap-4 border ${
           isScrolled
-            ? 'top-3 w-[92%] max-w-5xl rounded-2xl border border-white/10 bg-black/65 backdrop-blur-xl px-5 py-2 sm:py-2.5 shadow-[0_15px_35px_rgba(0,0,0,0.85),_0_0_20px_rgba(255,255,255,0.03)]'
-            : 'top-0 w-full border-b border-white/5 bg-black/35 backdrop-blur-md px-6 py-4 md:px-12'
+            ? 'top-3 w-[92%] max-w-5xl rounded-2xl border-white/10 bg-black/65 backdrop-blur-xl px-5 py-2 sm:py-2.5 shadow-[0_15px_35px_rgba(0,0,0,0.85),_0_0_20px_rgba(255,255,255,0.03)]'
+            : 'top-0 w-full max-w-[100vw] rounded-none border-white/5 border-t-transparent border-x-transparent bg-black/35 backdrop-blur-md px-6 py-4 md:px-12'
         }`}
       >
         <div className="flex items-center gap-3">
