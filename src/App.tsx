@@ -2683,7 +2683,7 @@ export default function App() {
                                       setFocusTaskId(task.id)
                                       setShowFocusMode(true)
                                     }}
-                                    className="interactive-control flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white text-zinc-950 font-semibold transition-colors"
+                                    className="interactive-control flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white text-zinc-300 hover:text-zinc-950 font-semibold transition-colors"
                                   >
                                     <Clock className="h-3.5 w-3.5" />
                                     <span>Sync Focus</span>
