@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import {
   CheckCircle2,
   Circle,
   Plus,
   Trash2,
   Calendar,
+  CalendarDays,
   Tag,
   AlertCircle,
   Award,
@@ -19,7 +20,18 @@ import {
   BarChart3,
   Clock,
   PlusCircle,
-  Undo
+  Undo,
+  LogOut,
+  ShieldCheck,
+  Brain,
+  Target,
+  Zap,
+  ArrowLeft,
+  ArrowRight,
+  Download,
+  Upload,
+  CalendarPlus,
+  CheckCheck
 } from 'lucide-react'
 import { FlickeringGrid } from '@/components/ui/FlickeringGrid'
 import type { Task, SubTask, UserProfile } from './types'
@@ -33,6 +45,70 @@ interface Category {
   disabled?: boolean
 }
 
+interface WindowWithWebkitAudioContext extends Window {
+  webkitAudioContext?: typeof AudioContext
+  google?: GoogleIdentityServices
+}
+
+type SortBy = 'dueDate' | 'priority' | 'createdAt'
+type SyncState = 'local' | 'ready' | 'synced'
+
+interface AuthUser {
+  id: string
+  name: string
+  email: string
+  picture?: string
+  provider: 'google' | 'local'
+  lastLoginAt: string
+}
+
+interface WorkspaceBackup {
+  app: 'aetherflow'
+  exportedAt: string
+  version: 1
+  tasks: Task[]
+  categories: Category[]
+  profile: UserProfile
+}
+
+interface GoogleCredentialResponse {
+  credential?: string
+  select_by?: string
+}
+
+interface GoogleIdentityServices {
+  accounts: {
+    id: {
+      disableAutoSelect: () => void
+      initialize: (config: {
+        callback: (response: GoogleCredentialResponse) => void
+        client_id: string
+        use_fedcm_for_prompt?: boolean
+      }) => void
+      prompt: () => void
+      renderButton: (
+        parent: HTMLElement,
+        options: {
+          logo_alignment?: 'left' | 'center'
+          shape?: 'rectangular' | 'pill' | 'circle' | 'square'
+          size?: 'large' | 'medium' | 'small'
+          text?: 'signin_with' | 'signup_with' | 'continue_with' | 'signin'
+          theme?: 'outline' | 'filled_blue' | 'filled_black'
+          type?: 'standard' | 'icon'
+          width?: number
+        }
+      ) => void
+    }
+  }
+}
+
+interface GoogleJwtPayload {
+  email?: string
+  name?: string
+  picture?: string
+  sub?: string
+}
+
 const DEFAULT_CATEGORIES: Category[] = [
   { id: 'inbox', name: 'Inbox', color: '#9ca3af', glowColor: 'rgba(156, 163, 175, 0.2)' },
   { id: 'work', name: 'Work', color: '#71717a', glowColor: 'rgba(113, 113, 122, 0.2)' },
@@ -41,10 +117,105 @@ const DEFAULT_CATEGORIES: Category[] = [
   { id: 'ideas', name: 'Ideas', color: '#f3f4f6', glowColor: 'rgba(243, 244, 246, 0.2)' }
 ]
 
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined
+
+const parseGoogleCredential = (credential: string): GoogleJwtPayload | null => {
+  try {
+    const [, payload] = credential.split('.')
+    if (!payload) return null
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(window.atob(normalized)) as GoogleJwtPayload
+  } catch (error) {
+    console.warn('Unable to parse Google credential payload:', error)
+    return null
+  }
+}
+
+const toDateKey = (date: Date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const getMonthMatrix = (cursor: Date) => {
+  const firstDay = new Date(cursor.getFullYear(), cursor.getMonth(), 1)
+  const start = new Date(firstDay)
+  start.setDate(firstDay.getDate() - firstDay.getDay())
+
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(start)
+    date.setDate(start.getDate() + index)
+    return date
+  })
+}
+
+const getPriorityWeight = (priority: Task['priority']) => {
+  if (priority === 'high') return 3
+  if (priority === 'medium') return 2
+  return 1
+}
+
+const getTaskUrgencyScore = (task: Task, now: number) => {
+  if (task.completed) return -1
+  const dueScore = task.dueDate
+    ? Math.max(0, 7 - Math.floor((new Date(task.dueDate).getTime() - now) / 86400000))
+    : 1
+  return getPriorityWeight(task.priority) * 10 + dueScore + task.subtasks.filter((sub) => !sub.completed).length
+}
+
+const downloadTextFile = (filename: string, content: string, type: string) => {
+  const blob = new Blob([content], { type })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+const escapeIcsText = (value: string) => {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\n/g, '\\n')
+    .replace(/,/g, '\\,')
+    .replace(/;/g, '\\;')
+}
+
+const makeTaskCalendar = (tasks: Task[]) => {
+  const dueTasks = tasks.filter((task) => task.dueDate)
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'
+  const events = dueTasks.map((task) => {
+    const start = task.dueDate.replace(/-/g, '')
+    const endDate = new Date(`${task.dueDate}T00:00:00`)
+    endDate.setDate(endDate.getDate() + 1)
+    const end = toDateKey(endDate).replace(/-/g, '')
+
+    return [
+      'BEGIN:VEVENT',
+      `UID:${task.id}@aetherflow.local`,
+      `DTSTAMP:${stamp}`,
+      `DTSTART;VALUE=DATE:${start}`,
+      `DTEND;VALUE=DATE:${end}`,
+      `SUMMARY:${escapeIcsText(task.title)}`,
+      task.description ? `DESCRIPTION:${escapeIcsText(task.description)}` : '',
+      `CATEGORIES:${escapeIcsText(task.priority.toUpperCase())}`,
+      'END:VEVENT'
+    ].filter(Boolean).join('\r\n')
+  })
+
+  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Aetherflow//Task Calendar//EN', ...events, 'END:VCALENDAR'].join('\r\n')
+}
+
 // Audio synthesizer for premium UX sound feedback
 const playSynthesizedSound = (type: 'complete' | 'click' | 'levelUp' | 'delete') => {
   try {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+    const AudioContextCtor =
+      window.AudioContext || (window as WindowWithWebkitAudioContext).webkitAudioContext
+
+    if (!AudioContextCtor) return
+
+    const ctx = new AudioContextCtor()
     const osc = ctx.createOscillator()
     const gain = ctx.createGain()
     osc.connect(gain)
@@ -119,6 +290,16 @@ const playSynthesizedSound = (type: 'complete' | 'click' | 'levelUp' | 'delete')
 
 export default function App() {
   // --- STATE DECLARATIONS ---
+  const googleButtonRef = useRef<HTMLDivElement | null>(null)
+  const backupInputRef = useRef<HTMLInputElement | null>(null)
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => {
+    const saved = localStorage.getItem('aether_auth_user')
+    return saved ? JSON.parse(saved) : null
+  })
+  const [syncState, setSyncState] = useState<SyncState>(() => {
+    return localStorage.getItem('aether_auth_user') ? 'ready' : 'local'
+  })
+
   const [tasks, setTasks] = useState<Task[]>(() => {
     const saved = localStorage.getItem('aether_tasks')
     return saved ? JSON.parse(saved) : []
@@ -169,7 +350,8 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('all')
   const [priorityFilter, setPriorityFilter] = useState<string>('all')
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all')
-  const [sortBy, setSortBy] = useState<'dueDate' | 'priority' | 'createdAt'>('createdAt')
+  const [dueDateFilter, setDueDateFilter] = useState<string | null>(null)
+  const [sortBy, setSortBy] = useState<SortBy>('createdAt')
 
   // Expanded/Editing Task Details State
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
@@ -185,6 +367,8 @@ export default function App() {
 
   // Time & Date State
   const [currentTime, setCurrentTime] = useState(new Date())
+  const [calendarCursor, setCalendarCursor] = useState(() => new Date())
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => toDateKey(new Date()))
 
   // Scroll State for top header Dock transition
   const [isScrolled, setIsScrolled] = useState(false)
@@ -200,7 +384,105 @@ export default function App() {
   const [renamingCategoryId, setRenamingCategoryId] = useState<string | null>(null)
   const [renamingName, setRenamingName] = useState<string>('')
 
+  const handleGoogleCredential = useCallback((response: GoogleCredentialResponse) => {
+    if (!response.credential) return
+    const payload = parseGoogleCredential(response.credential)
+    if (!payload?.sub || !payload.email) return
+
+    const nextUser: AuthUser = {
+      id: payload.sub,
+      name: payload.name || payload.email.split('@')[0],
+      email: payload.email,
+      picture: payload.picture,
+      provider: 'google',
+      lastLoginAt: new Date().toISOString()
+    }
+
+    playSynthesizedSound('complete')
+    setAuthUser(nextUser)
+    setSyncState('ready')
+  }, [])
+
+  const handleLocalWorkspace = useCallback(() => {
+    playSynthesizedSound('click')
+    setAuthUser({
+      id: 'local-workspace',
+      name: 'Local Workspace',
+      email: 'stored on this device',
+      provider: 'local',
+      lastLoginAt: new Date().toISOString()
+    })
+    setSyncState('local')
+  }, [])
+
+  const handleSignOut = useCallback(() => {
+    playSynthesizedSound('click')
+    ;(window as WindowWithWebkitAudioContext).google?.accounts.id.disableAutoSelect()
+    setAuthUser(null)
+    setSyncState('local')
+  }, [])
+
+  const handleExportBackup = () => {
+    playSynthesizedSound('click')
+    const backup: WorkspaceBackup = {
+      app: 'aetherflow',
+      categories,
+      exportedAt: new Date().toISOString(),
+      profile,
+      tasks,
+      version: 1
+    }
+    downloadTextFile(`aetherflow-backup-${toDateKey(new Date())}.json`, JSON.stringify(backup, null, 2), 'application/json')
+  }
+
+  const handleImportBackup = (file: File | null) => {
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const backup = JSON.parse(String(reader.result)) as WorkspaceBackup
+        if (backup.app !== 'aetherflow' || !Array.isArray(backup.tasks) || !Array.isArray(backup.categories)) {
+          throw new Error('Invalid Aetherflow backup file.')
+        }
+
+        playSynthesizedSound('complete')
+        setTasks(backup.tasks)
+        setCategories(backup.categories.length > 0 ? backup.categories : DEFAULT_CATEGORIES)
+        setProfile(backup.profile)
+        setExpandedTaskId(null)
+        setEditingTaskId(null)
+      } catch (error) {
+        console.warn('Backup import failed:', error)
+        window.alert('That file is not a valid Aetherflow backup.')
+      } finally {
+        if (backupInputRef.current) backupInputRef.current.value = ''
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  const handleExportCalendar = () => {
+    playSynthesizedSound('click')
+    downloadTextFile(`aetherflow-calendar-${toDateKey(new Date())}.ics`, makeTaskCalendar(tasks), 'text/calendar')
+  }
+
+  const handleClearCompleted = () => {
+    const completedCount = tasks.filter((task) => task.completed).length
+    if (completedCount === 0) return
+    playSynthesizedSound('delete')
+    setTasks((prev) => prev.filter((task) => !task.completed))
+  }
+
   // --- PERSISTENCE EFFECTS ---
+  useEffect(() => {
+    if (authUser) {
+      localStorage.setItem('aether_auth_user', JSON.stringify(authUser))
+    } else {
+      localStorage.removeItem('aether_auth_user')
+    }
+  }, [authUser])
+
   useEffect(() => {
     localStorage.setItem('aether_tasks', JSON.stringify(tasks))
   }, [tasks])
@@ -212,6 +494,72 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('aether_profile', JSON.stringify(profile))
   }, [profile])
+
+  useEffect(() => {
+    if (!authUser) return
+    const readyTimer = window.setTimeout(() => setSyncState('ready'), 0)
+    const syncTimer = window.setTimeout(() => setSyncState('synced'), 450)
+    return () => {
+      window.clearTimeout(readyTimer)
+      window.clearTimeout(syncTimer)
+    }
+  }, [authUser, tasks, categories, profile])
+
+  useEffect(() => {
+    if (!googleClientId || !googleButtonRef.current) return
+
+    const googleWindow = window as WindowWithWebkitAudioContext
+    let cancelled = false
+
+    const initializeGoogle = () => {
+      if (cancelled || !googleWindow.google || !googleButtonRef.current) return
+
+      googleButtonRef.current.innerHTML = ''
+      googleWindow.google.accounts.id.initialize({
+        callback: handleGoogleCredential,
+        client_id: googleClientId,
+        use_fedcm_for_prompt: true
+      })
+      googleWindow.google.accounts.id.renderButton(googleButtonRef.current, {
+        logo_alignment: 'left',
+        shape: 'pill',
+        size: 'large',
+        text: 'continue_with',
+        theme: 'outline',
+        type: 'standard',
+        width: 280
+      })
+    }
+
+    if (googleWindow.google) {
+      initializeGoogle()
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const existingScript = document.getElementById('google-identity-services')
+    if (existingScript) {
+      existingScript.addEventListener('load', initializeGoogle, { once: true })
+      return () => {
+        cancelled = true
+        existingScript.removeEventListener('load', initializeGoogle)
+      }
+    }
+
+    const script = document.createElement('script')
+    script.id = 'google-identity-services'
+    script.src = 'https://accounts.google.com/gsi/client'
+    script.async = true
+    script.defer = true
+    script.addEventListener('load', initializeGoogle, { once: true })
+    document.head.appendChild(script)
+
+    return () => {
+      cancelled = true
+      script.removeEventListener('load', initializeGoogle)
+    }
+  }, [handleGoogleCredential, authUser])
 
   // Current Date Timer
   useEffect(() => {
@@ -595,7 +943,8 @@ export default function App() {
   }, [categories, selectedCategoryFilter])
 
   const stats = useMemo(() => {
-    const today = new Date().toDateString()
+    const today = currentTime.toDateString()
+    const now = currentTime.getTime()
     const todayTasks = tasks.filter((t) => new Date(t.createdAt).toDateString() === today)
     const todayCompleted = todayTasks.filter((t) => t.completed)
     const completionRate = todayTasks.length > 0 ? Math.round((todayCompleted.length / todayTasks.length) * 100) : 0
@@ -605,7 +954,7 @@ export default function App() {
       if (t.completed || !t.dueDate) return false
       const due = new Date(t.dueDate)
       due.setHours(23, 59, 59, 999) // End of day
-      return due.getTime() < Date.now()
+      return due.getTime() < now
     }).length
 
     return {
@@ -617,7 +966,52 @@ export default function App() {
       totalActive: tasks.filter((t) => !t.completed).length,
       totalCompleted: tasks.filter((t) => t.completed).length
     }
+  }, [tasks, currentTime])
+
+  const calendarDays = useMemo(() => getMonthMatrix(calendarCursor), [calendarCursor])
+
+  const tasksByDueDate = useMemo(() => {
+    const grouped: Record<string, Task[]> = {}
+    tasks.forEach((task) => {
+      if (!task.dueDate) return
+      grouped[task.dueDate] = [...(grouped[task.dueDate] || []), task]
+    })
+    return grouped
   }, [tasks])
+
+  const selectedDateTasks = tasksByDueDate[selectedCalendarDate] || []
+
+  const focusQueue = useMemo(() => {
+    const now = currentTime.getTime()
+    return [...tasks]
+      .filter((task) => !task.completed)
+      .sort((a, b) => getTaskUrgencyScore(b, now) - getTaskUrgencyScore(a, now))
+      .slice(0, 3)
+  }, [tasks, currentTime])
+
+  const intelligence = useMemo(() => {
+    const todayKey = toDateKey(currentTime)
+    const nextSevenDays = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(currentTime)
+      date.setDate(currentTime.getDate() + index)
+      return toDateKey(date)
+    })
+    const dueThisWeek = tasks.filter((task) => !task.completed && task.dueDate && nextSevenDays.includes(task.dueDate)).length
+    const dueToday = tasks.filter((task) => !task.completed && task.dueDate === todayKey).length
+    const blockedBySubtasks = tasks.filter(
+      (task) => !task.completed && task.subtasks.length > 0 && task.subtasks.every((subtask) => !subtask.completed)
+    ).length
+    const pressure = stats.overdueTasks * 3 + dueToday * 2 + dueThisWeek + stats.highPriorityActive * 2
+    const grade = pressure > 18 ? 'Critical' : pressure > 10 ? 'Elevated' : pressure > 4 ? 'Steady' : 'Clear'
+
+    return {
+      blockedBySubtasks,
+      dueThisWeek,
+      dueToday,
+      grade,
+      pressure
+    }
+  }, [tasks, currentTime, stats.highPriorityActive, stats.overdueTasks])
 
   // Category task counter mapping
   const categoryCounts = useMemo(() => {
@@ -658,8 +1052,9 @@ export default function App() {
         // Category Filter
         const matchesCategory =
           selectedCategoryFilter === 'all' || task.category === selectedCategoryFilter
+        const matchesDueDate = !dueDateFilter || task.dueDate === dueDateFilter
 
-        return matchesSearch && matchesStatus && matchesPriority && matchesCategory
+        return matchesSearch && matchesStatus && matchesPriority && matchesCategory && matchesDueDate
       })
       .sort((a, b) => {
         if (sortBy === 'dueDate') {
@@ -674,19 +1069,96 @@ export default function App() {
         // Default: createdAt newest first
         return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       })
-  }, [tasks, searchQuery, statusFilter, priorityFilter, selectedCategoryFilter, sortBy])
+  }, [tasks, categories, searchQuery, statusFilter, priorityFilter, selectedCategoryFilter, dueDateFilter, sortBy])
 
   // Render SVG circular progress bar logic
   const circleRadius = 35
   const circleCircumference = 2 * Math.PI * circleRadius
   const circleDashOffset = circleCircumference - (stats.completionRate / 100) * circleCircumference
 
+  if (!authUser) {
+    return (
+      <div className="relative min-h-screen bg-[#000000] text-gray-200 overflow-x-hidden font-sans antialiased flex items-center justify-center p-4 selection:bg-zinc-500/30 selection:text-zinc-300">
+        {/* Canvas Flickering Grid Background */}
+        <div className="fixed inset-0 w-full h-full z-0 pointer-events-none opacity-40 transition-opacity duration-700">
+          <FlickeringGrid
+            color={gridColor}
+            maxOpacity={gridMaxOpacity}
+            gridGap={gridGap}
+            squareSize={gridSquareSize}
+            flickerChance={gridFlickerChance}
+          />
+        </div>
+
+        {/* Auth Gate Panel */}
+        <div className="relative z-10 w-full max-w-md glass-card rounded-3xl p-8 md:p-10 shadow-[0_20px_50px_rgba(0,0,0,0.85)] border border-white/10 animate-scale-in">
+          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-zinc-300/30 to-transparent pointer-events-none" />
+
+          {/* Glowing Brand Icon */}
+          <div className="flex justify-center mb-6">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-tr from-zinc-700 to-zinc-400 shadow-[0_0_30px_rgba(255,255,255,0.15)]">
+              <Sparkles className="h-8 w-8 text-white animate-pulse" />
+            </div>
+          </div>
+
+          {/* Title / Description */}
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-extrabold tracking-tight text-gradient font-heading m-0 leading-none">
+              AETHERFLOW
+            </h1>
+            <p className="mt-2 text-xs text-zinc-400 font-mono tracking-wider">
+              Productivity Engine v4.3
+            </p>
+            <p className="mt-4 text-sm text-zinc-500 leading-relaxed max-w-xs mx-auto">
+              A premium local-first task manager and gamified productivity space.
+            </p>
+          </div>
+
+          {/* Action Surface */}
+          <div className="space-y-4">
+            {googleClientId ? (
+              <div className="flex flex-col items-center justify-center gap-3">
+                <div className="w-full flex justify-center min-h-[44px] overflow-hidden rounded-full border border-white/10 bg-white/2 p-0.5" ref={googleButtonRef} />
+                <div className="flex items-center w-full gap-3 py-1">
+                  <div className="h-px bg-white/5 flex-grow" />
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">or</span>
+                  <div className="h-px bg-white/5 flex-grow" />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4 text-center text-xs leading-relaxed text-zinc-400">
+                <p className="font-semibold text-zinc-300 mb-1">Cloud Sync Info</p>
+                To enable Google Authentication, add your <code className="font-mono text-zinc-300 text-[10px] bg-white/5 px-1 py-0.5 rounded">VITE_GOOGLE_CLIENT_ID</code> inside the <code className="font-mono text-zinc-300 text-[10px] bg-white/5 px-1 py-0.5 rounded">.env</code> file.
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleLocalWorkspace}
+              className="interactive-control flex w-full items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-5 py-3.5 text-sm font-semibold text-zinc-200 transition-all duration-300 hover:bg-white/10 hover:border-white/20 hover:text-white shadow-[0_0_20px_rgba(255,255,255,0.02)] hover:shadow-[0_0_25px_rgba(255,255,255,0.05)] hover:scale-[1.01] active:scale-[0.99]"
+            >
+              <ShieldCheck className="h-5 w-5 text-zinc-400" />
+              Access Local Workspace
+            </button>
+          </div>
+
+          {/* Footer Specifications */}
+          <div className="mt-8 pt-6 border-t border-white/5 flex items-center justify-between font-mono text-[9px] uppercase tracking-wider text-zinc-500">
+            <span>Local-first</span>
+            <span>60 FPS Motion</span>
+            <span>V4.3</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="relative min-h-screen bg-[#000000] text-gray-200 overflow-x-hidden font-sans pb-16 selection:bg-zinc-500/30 selection:text-zinc-300">
+    <div className="relative min-h-screen bg-[#000000] text-gray-200 overflow-x-hidden font-sans antialiased pb-16 selection:bg-zinc-500/30 selection:text-zinc-300">
       {/* Spacer to prevent page content layout shift/jump due to fixed header positioning */}
       <div className="h-[136px] md:h-[73px]" />
       {/* Canvas Flickering Grid Background */}
-      <div className="fixed inset-0 w-full h-full z-0 pointer-events-none opacity-40">
+      <div className="fixed inset-0 w-full h-full z-0 pointer-events-none opacity-40 transition-opacity duration-700">
         <FlickeringGrid
           color={gridColor}
           maxOpacity={gridMaxOpacity}
@@ -700,7 +1172,7 @@ export default function App() {
       {sparks.map((spark) => (
         <div
           key={spark.id}
-          className="fixed pointer-events-none rounded-full z-50 transition-transform"
+          className="fixed pointer-events-none rounded-full z-50 -translate-x-1/2 -translate-y-1/2 transition-transform duration-150 ease-out"
           style={{
             left: spark.x,
             top: spark.y,
@@ -759,7 +1231,7 @@ export default function App() {
               ? 'px-2.5 py-1 rounded-lg bg-zinc-800/10'
               : 'px-3 py-1.5 rounded-lg bg-zinc-800/20'
           }`}>
-            <Flame className={`text-zinc-355 fill-zinc-400/35 animate-bounce transition-all duration-500 ${isScrolled ? 'h-4.5 w-4.5' : 'h-5 w-5'}`} />
+            <Flame className={`text-zinc-300 fill-zinc-400/35 animate-bounce transition-all duration-500 ${isScrolled ? 'h-[18px] w-[18px]' : 'h-5 w-5'}`} />
             <span className={`font-bold font-heading transition-all duration-500 ${isScrolled ? 'text-base' : 'text-lg'}`}>{profile.streak}</span>
             <span className={`text-[10px] text-zinc-400/70 font-mono transition-all duration-500 ${
               isScrolled ? 'hidden md:inline' : 'inline'
@@ -767,6 +1239,24 @@ export default function App() {
               DAY STREAK
             </span>
           </div>
+
+          {authUser && (
+            <div className={`hidden md:flex items-center gap-2 border border-white/5 bg-white/3 transition-all duration-500 ${
+              isScrolled ? 'px-2 py-1 rounded-lg' : 'px-2.5 py-1.5 rounded-xl'
+            }`}>
+              {authUser.picture ? (
+                <img src={authUser.picture} alt="" className="h-6 w-6 rounded-full border border-white/10" />
+              ) : (
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-800 text-[10px] font-bold text-white">
+                  {authUser.name.slice(0, 1).toUpperCase()}
+                </div>
+              )}
+              <div className="max-w-[130px] leading-none">
+                <span className="block truncate text-xs font-semibold text-zinc-200">{authUser.name}</span>
+                <span className="block text-[9px] uppercase tracking-wide text-zinc-500">{syncState}</span>
+              </div>
+            </div>
+          )}
         </div>
       </header>
 
@@ -775,15 +1265,118 @@ export default function App() {
         
         {/* SIDEBAR: NAVIGATION & METRICS (4 columns) */}
         <section className="lg:col-span-4 flex flex-col gap-6">
+
+          {/* ACCOUNT & SYNC SURFACE */}
+          <div className="glass-card motion-card rounded-2xl p-6 relative overflow-hidden">
+            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-zinc-300/30 to-transparent pointer-events-none" />
+
+            {authUser && (
+              <div className="space-y-5">
+                <div className="flex items-center gap-3">
+                  {authUser.picture ? (
+                    <img src={authUser.picture} alt="" className="h-12 w-12 rounded-2xl border border-white/10" />
+                  ) : (
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-800 text-lg font-bold text-white">
+                      {authUser.name.slice(0, 1).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <h3 className="truncate text-base font-semibold text-white">{authUser.name}</h3>
+                    <p className="truncate text-xs text-zinc-500">{authUser.email}</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 font-mono text-[10px] uppercase">
+                  <div className="stat-tile rounded-xl border border-white/5 p-2 text-center">
+                    <ShieldCheck className="mx-auto mb-1 h-4 w-4 text-zinc-300" />
+                    <span className="block text-zinc-500">Auth</span>
+                    <span className="text-zinc-200">{authUser.provider === 'google' ? 'Google' : 'Local'}</span>
+                  </div>
+                  <div className="stat-tile rounded-xl border border-white/5 p-2 text-center">
+                    <Zap className="mx-auto mb-1 h-4 w-4 text-zinc-300" />
+                    <span className="block text-zinc-500">Sync</span>
+                    <span className="text-zinc-200">{syncState}</span>
+                  </div>
+                  <div className="stat-tile rounded-xl border border-white/5 p-2 text-center">
+                    <Target className="mx-auto mb-1 h-4 w-4 text-zinc-300" />
+                    <span className="block text-zinc-500">Focus</span>
+                    <span className="text-zinc-200">{focusQueue.length}</span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  className="interactive-control flex w-full items-center justify-center gap-2 rounded-xl border border-white/5 bg-white/2 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 hover:text-white"
+                >
+                  <LogOut className="h-4 w-4" />
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* WORKSPACE TOOLS */}
+          <div className="glass-card motion-card rounded-2xl p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <h4 className="text-white font-semibold text-base font-heading flex items-center gap-2">
+                <Zap className="h-4 w-4 text-zinc-400" />
+                Workspace Tools
+              </h4>
+              <span className="text-[10px] font-mono uppercase tracking-wide text-zinc-500">Local-first</span>
+            </div>
+
+            <input
+              ref={backupInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => handleImportBackup(event.target.files?.[0] || null)}
+            />
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={handleExportBackup}
+                className="interactive-control flex items-center justify-center gap-2 rounded-xl border border-white/5 bg-white/2 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 hover:text-white"
+              >
+                <Download className="h-4 w-4" />
+                Backup
+              </button>
+              <button
+                type="button"
+                onClick={() => backupInputRef.current?.click()}
+                className="interactive-control flex items-center justify-center gap-2 rounded-xl border border-white/5 bg-white/2 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 hover:text-white"
+              >
+                <Upload className="h-4 w-4" />
+                Restore
+              </button>
+              <button
+                type="button"
+                onClick={handleExportCalendar}
+                className="interactive-control flex items-center justify-center gap-2 rounded-xl border border-white/5 bg-white/2 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 hover:text-white"
+              >
+                <CalendarPlus className="h-4 w-4" />
+                Calendar
+              </button>
+              <button
+                type="button"
+                onClick={handleClearCompleted}
+                className="interactive-control flex items-center justify-center gap-2 rounded-xl border border-white/5 bg-white/2 px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/5 hover:text-white"
+              >
+                <CheckCheck className="h-4 w-4" />
+                Clear Done
+              </button>
+            </div>
+          </div>
           
           {/* USER PROFILE & LEVEL SYSTEM */}
-          <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
-            {/* Background Glow */}
-            <div className="absolute -top-10 -right-10 w-24 h-24 bg-zinc-500/10 rounded-full blur-2xl pointer-events-none" />
+          <div className="glass-card motion-card rounded-2xl p-6 relative overflow-hidden">
+            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/20 to-transparent pointer-events-none" />
 
             <div className="flex items-center gap-4">
               {/* Level Circle Display */}
-              <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-white/3 border-2 border-zinc-500/50 shadow-[0_0_15px_rgba(255,255,255,0.1)]">
+              <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-white/3 border-2 border-zinc-500/50 shadow-[0_0_15px_rgba(255,255,255,0.1)] transition-transform duration-300 ease-out hover:scale-[1.03]">
                 <Trophy className="absolute -top-2 -right-2 h-5 w-5 text-zinc-400 fill-zinc-500/50 rotate-12" />
                 <div className="text-center">
                   <span className="block text-2xl font-bold font-heading text-white">{profile.level}</span>
@@ -815,11 +1408,11 @@ export default function App() {
 
             {/* Core Stats Overview */}
             <div className="grid grid-cols-2 gap-3 mt-6 pt-4 border-t border-white/5 font-mono">
-              <div className="bg-white/2 rounded-xl p-3 border border-white/5 text-center">
+              <div className="stat-tile rounded-xl p-3 border border-white/5 text-center">
                 <span className="block text-xs text-gray-400 uppercase">Completed</span>
                 <span className="text-xl font-bold text-white font-heading">{profile.totalCompletedTasks}</span>
               </div>
-              <div className="bg-white/2 rounded-xl p-3 border border-white/5 text-center">
+              <div className="stat-tile rounded-xl p-3 border border-white/5 text-center">
                 <span className="block text-xs text-gray-400 uppercase">Active</span>
                 <span className="text-xl font-bold text-zinc-300 font-heading">{stats.totalActive}</span>
               </div>
@@ -827,7 +1420,7 @@ export default function App() {
           </div>
 
           {/* DAILY PRODUCTIVITY METRIC */}
-          <div className="glass-card rounded-2xl p-6 flex items-center justify-between gap-4">
+          <div className="glass-card motion-card rounded-2xl p-6 flex items-center justify-between gap-4">
             <div className="space-y-1">
               <h4 className="text-white font-semibold text-base font-heading">Today's Flow Rate</h4>
               <p className="text-xs text-gray-400 max-w-[160px]">Percentage of tasks completed today.</p>
@@ -867,8 +1460,152 @@ export default function App() {
             </div>
           </div>
 
+          {/* SMART CALENDAR */}
+          <div className="glass-card motion-card rounded-2xl p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <h4 className="flex items-center gap-2 text-base font-semibold text-white font-heading">
+                <CalendarDays className="h-4 w-4 text-zinc-400" />
+                Calendar
+              </h4>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    playSynthesizedSound('click')
+                    setCalendarCursor((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))
+                  }}
+                  className="icon-control rounded-lg border border-white/5 bg-white/2 p-1.5 text-zinc-400 hover:text-white"
+                  aria-label="Previous month"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    playSynthesizedSound('click')
+                    const today = new Date()
+                    setCalendarCursor(today)
+                    setSelectedCalendarDate(toDateKey(today))
+                    setDueDateFilter(toDateKey(today))
+                  }}
+                  className="interactive-control rounded-lg border border-white/5 bg-white/2 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-300 hover:text-white"
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    playSynthesizedSound('click')
+                    setCalendarCursor((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))
+                  }}
+                  className="icon-control rounded-lg border border-white/5 bg-white/2 p-1.5 text-zinc-400 hover:text-white"
+                  aria-label="Next month"
+                >
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="mb-3 flex items-end justify-between">
+              <div>
+                <span className="block text-xl font-bold text-white font-heading">
+                  {calendarCursor.toLocaleDateString([], { month: 'long' })}
+                </span>
+                <span className="text-xs font-mono text-zinc-500">{calendarCursor.getFullYear()}</span>
+              </div>
+              <div className="rounded-xl border border-white/5 bg-black/20 px-3 py-2 text-right">
+                <span className="block text-lg font-bold text-white font-heading">{selectedDateTasks.length}</span>
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">due selected</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-7 gap-1.5 text-center text-[10px] font-mono uppercase tracking-wide text-zinc-600">
+              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, index) => (
+                <span key={`${day}-${index}`}>{day}</span>
+              ))}
+            </div>
+
+            <div className="mt-2 grid grid-cols-7 gap-1.5">
+              {calendarDays.map((date) => {
+                const dateKey = toDateKey(date)
+                const dayTasks = tasksByDueDate[dateKey] || []
+                const isCurrentMonth = date.getMonth() === calendarCursor.getMonth()
+                const isToday = dateKey === toDateKey(currentTime)
+                const isSelected = dateKey === selectedCalendarDate
+                const activeCount = dayTasks.filter((task) => !task.completed).length
+
+                return (
+                  <button
+                    key={dateKey}
+                    type="button"
+                    onClick={() => {
+                      playSynthesizedSound('click')
+                      setSelectedCalendarDate(dateKey)
+                      setDueDateFilter(dateKey)
+                    }}
+                    className={`interactive-control relative flex aspect-square min-h-9 flex-col items-center justify-center rounded-xl border text-xs font-semibold ${
+                      isSelected
+                        ? 'border-zinc-300 bg-zinc-200 text-zinc-950 shadow-[0_0_20px_rgba(255,255,255,0.12)]'
+                        : isToday
+                          ? 'border-zinc-500/60 bg-zinc-800/50 text-white'
+                          : 'border-white/5 bg-white/2 text-zinc-400 hover:border-white/15 hover:text-white'
+                    } ${isCurrentMonth ? '' : 'opacity-35'}`}
+                  >
+                    <span>{date.getDate()}</span>
+                    {activeCount > 0 && (
+                      <span className={`mt-1 h-1.5 rounded-full ${activeCount > 2 ? 'w-4' : 'w-1.5'} ${
+                        isSelected ? 'bg-zinc-950' : 'bg-zinc-300'
+                      }`} />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-white/5 bg-black/20 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-semibold text-white">
+                  {new Date(selectedCalendarDate).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
+                </span>
+                {dueDateFilter && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSynthesizedSound('click')
+                      setDueDateFilter(null)
+                    }}
+                    className="icon-control text-zinc-500 hover:text-white"
+                    aria-label="Clear calendar filter"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+              <div className="space-y-2">
+                {selectedDateTasks.length === 0 ? (
+                  <p className="text-xs text-zinc-600">No due tasks on this date.</p>
+                ) : (
+                  selectedDateTasks.slice(0, 3).map((task) => (
+                    <button
+                      key={task.id}
+                      type="button"
+                      onClick={() => {
+                        playSynthesizedSound('click')
+                        setExpandedTaskId(task.id)
+                      }}
+                      className="interactive-control flex w-full items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/2 px-3 py-2 text-left"
+                    >
+                      <span className={`truncate text-xs ${task.completed ? 'text-zinc-600 line-through' : 'text-zinc-300'}`}>{task.title}</span>
+                      <span className="text-[10px] uppercase text-zinc-500">{task.priority}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
           {/* CATEGORIES SELECTION & DYNAMIC MANAGER */}
-          <div id="category-filters-card" className="glass-card rounded-2xl p-6">
+          <div id="category-filters-card" className="glass-card motion-card rounded-2xl p-6">
             <div className="flex justify-between items-center mb-4">
               <h4 className="text-white font-semibold text-base font-heading flex items-center gap-2">
                 <Tag className="h-4 w-4 text-zinc-400" />
@@ -879,7 +1616,7 @@ export default function App() {
                   playSynthesizedSound('click')
                   setShowCustomCatForm(!showCustomCatForm)
                 }}
-                className="text-xs text-zinc-400 hover:text-zinc-300 font-mono flex items-center gap-1 bg-zinc-800/10 hover:bg-zinc-800/20 px-2 py-1 rounded transition-colors"
+                className="interactive-control text-xs text-zinc-400 hover:text-zinc-300 font-mono flex items-center gap-1 bg-zinc-800/10 hover:bg-zinc-800/20 px-2 py-1 rounded transition-colors"
               >
                 <PlusCircle className="h-3 w-3" /> ADD
               </button>
@@ -889,7 +1626,7 @@ export default function App() {
             {showCustomCatForm && (
               <form
                 onSubmit={handleAddCustomCategory}
-                className="mb-4 p-3 bg-white/2 rounded-xl border border-white/5 space-y-3 animate-slide-up"
+                className="reveal-panel mb-4 p-3 bg-white/2 rounded-xl border border-white/5 space-y-3"
               >
                 <div>
                   <label className="block text-[10px] font-mono text-gray-400 mb-1 uppercase">Category Name</label>
@@ -899,7 +1636,7 @@ export default function App() {
                     value={customCatName}
                     onChange={(e) => setCustomCatName(e.target.value)}
                     placeholder="E.g. Creative, Health..."
-                    className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500"
+                    className="smooth-field w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500"
                   />
                 </div>
                 <div>
@@ -913,7 +1650,7 @@ export default function App() {
                           playSynthesizedSound('click')
                           setCustomCatColor(color)
                         }}
-                        className={`h-5 w-5 rounded-full border transition-transform ${
+                        className={`interactive-control h-5 w-5 rounded-full border transition-transform ${
                           customCatColor === color ? 'scale-125 border-white' : 'border-transparent'
                         }`}
                         style={{ backgroundColor: color }}
@@ -928,13 +1665,13 @@ export default function App() {
                       playSynthesizedSound('click')
                       setShowCustomCatForm(false)
                     }}
-                    className="px-2 py-1 rounded text-[10px] font-mono text-gray-400 hover:text-white"
+                    className="interactive-control px-2 py-1 rounded text-[10px] font-mono text-gray-400 hover:text-white"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-white rounded text-[10px] font-mono font-semibold"
+                    className="interactive-control px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-white rounded text-[10px] font-mono font-semibold"
                   >
                     Create
                   </button>
@@ -949,7 +1686,7 @@ export default function App() {
                   playSynthesizedSound('click')
                   setSelectedCategoryFilter('all')
                 }}
-                className={`w-full text-left px-3.5 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-between ${
+                className={`interactive-control w-full text-left px-3.5 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-between ${
                   selectedCategoryFilter === 'all'
                     ? 'bg-zinc-800/30 text-zinc-300 border border-zinc-700/50'
                     : 'bg-transparent text-gray-400 hover:bg-white/2 hover:text-gray-300 border border-transparent'
@@ -973,7 +1710,7 @@ export default function App() {
                         handleRenameCategory(cat.id, renamingName)
                       }}
                       onClick={(e) => e.stopPropagation()}
-                      className="w-full text-left px-3.5 py-2 rounded-xl bg-zinc-900 border border-zinc-700/50 flex items-center gap-2"
+                      className="reveal-panel w-full text-left px-3.5 py-2 rounded-xl bg-zinc-900 border border-zinc-700/50 flex items-center gap-2"
                     >
                       <div className="h-2 w-2 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
                       <input
@@ -985,7 +1722,7 @@ export default function App() {
                           if (e.key === 'Escape') setRenamingCategoryId(null)
                         }}
                         autoFocus
-                        className="bg-transparent text-sm text-white focus:outline-none w-full p-0 font-medium border-none outline-none leading-none"
+                        className="smooth-field bg-transparent text-sm text-white focus:outline-none w-full p-0 font-medium border-none outline-none leading-none"
                       />
                     </form>
                   )
@@ -1009,7 +1746,7 @@ export default function App() {
                         categoryId: cat.id
                       })
                     }}
-                    className={`w-full text-left px-3.5 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-between ${
+                    className={`interactive-control w-full text-left px-3.5 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-between ${
                       selectedCategoryFilter === cat.id
                         ? 'text-white border'
                         : 'bg-transparent text-gray-400 hover:bg-white/2 hover:text-gray-300 border border-transparent'
@@ -1033,13 +1770,13 @@ export default function App() {
           </div>
 
           {/* FLICKERING GRID SETTINGS & INTERACTION PANEL */}
-          <div id="background-grid-card" className="glass-card rounded-2xl p-6">
+          <div id="background-grid-card" className="glass-card motion-card rounded-2xl p-6">
             <button
               onClick={() => {
                 playSynthesizedSound('click')
                 setShowSettings(!showSettings)
               }}
-              className="w-full flex items-center justify-between text-white font-semibold text-base font-heading focus:outline-none"
+              className="interactive-control w-full flex items-center justify-between text-white font-semibold text-base font-heading focus:outline-none"
             >
               <span className="flex items-center gap-2">
                 <Sliders className="h-4 w-4 text-zinc-400" />
@@ -1053,7 +1790,7 @@ export default function App() {
             </button>
 
             {showSettings && (
-              <div className="mt-4 space-y-4 pt-3 border-t border-white/5 font-mono text-xs text-gray-400 animate-slide-up">
+              <div className="reveal-panel mt-4 space-y-4 pt-3 border-t border-white/5 font-mono text-xs text-gray-400">
                 {/* Grid Color Picker */}
                 <div>
                   <label className="block mb-1.5">GRID SPECTRUM</label>
@@ -1071,7 +1808,7 @@ export default function App() {
                           playSynthesizedSound('click')
                           setGridColor(col.val)
                         }}
-                        className={`py-1 rounded text-[10px] font-semibold border text-center transition-all ${
+                        className={`interactive-control py-1 rounded text-[10px] font-semibold border text-center transition-all ${
                           gridColor === col.val
                             ? 'bg-white/10 border-white text-white'
                             : 'bg-black/30 border-white/5 hover:border-white/20'
@@ -1159,7 +1896,7 @@ export default function App() {
         <section className="lg:col-span-8 flex flex-col gap-6">
 
           {/* DYNAMIC TASK CREATION PANEL */}
-          <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
+          <div className="glass-card motion-card rounded-2xl p-6 relative overflow-hidden">
             <form onSubmit={handleAddTask} className="space-y-4">
               <div className="relative">
                 <input
@@ -1169,20 +1906,20 @@ export default function App() {
                   value={newTitle}
                   onFocus={() => setIsFormExpanded(true)}
                   onChange={(e) => setNewTitle(e.target.value)}
-                  className="w-full bg-transparent border-b border-white/10 text-white font-medium text-lg py-2 focus:outline-none focus:border-zinc-500 transition-colors placeholder:text-gray-500"
+                  className="smooth-field w-full bg-transparent border-b border-white/10 text-white font-medium text-lg py-2 focus:outline-none focus:border-zinc-500 transition-colors placeholder:text-gray-500"
                 />
               </div>
 
               {/* Expands on focus to reveal optional detailed settings */}
               {isFormExpanded && (
-                <div className="space-y-4 pt-2 animate-slide-up">
+                <div className="reveal-panel space-y-4 pt-2">
                   <div>
                     <textarea
                       placeholder="Add task description..."
                       value={newDesc}
                       onChange={(e) => setNewDesc(e.target.value)}
                       rows={2}
-                      className="w-full bg-white/2 border border-white/5 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-zinc-500 transition-colors placeholder:text-gray-500 resize-none"
+                      className="smooth-field w-full bg-white/2 border border-white/5 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-zinc-500 transition-colors placeholder:text-gray-500 resize-none"
                     />
                   </div>
 
@@ -1199,7 +1936,7 @@ export default function App() {
                               playSynthesizedSound('click')
                               setNewPriority(p)
                             }}
-                            className={`flex-1 py-1.5 rounded-lg text-xs font-semibold capitalize border font-mono transition-all ${
+                            className={`interactive-control flex-1 py-1.5 rounded-lg text-xs font-semibold capitalize border font-mono transition-all ${
                               newPriority === p
                                 ? p === 'high'
                                   ? 'bg-zinc-300/10 border-zinc-400 text-white shadow-[0_0_10px_rgba(255,255,255,0.05)]'
@@ -1224,7 +1961,7 @@ export default function App() {
                           playSynthesizedSound('click')
                           setNewCategory(e.target.value)
                         }}
-                        className="w-full bg-white/2 border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono"
+                        className="smooth-field w-full bg-white/2 border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono"
                       >
                         {categories.filter(c => !c.disabled).map((cat) => (
                           <option key={cat.id} value={cat.id} className="bg-zinc-950 text-white">
@@ -1242,7 +1979,7 @@ export default function App() {
                           type="date"
                           value={newDueDate}
                           onChange={(e) => setNewDueDate(e.target.value)}
-                          className="w-full bg-white/2 border border-white/5 rounded-lg px-3 py-1 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono min-h-[30px]"
+                          className="smooth-field w-full bg-white/2 border border-white/5 rounded-lg px-3 py-1 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono min-h-[30px]"
                         />
                       </div>
                     </div>
@@ -1255,13 +1992,13 @@ export default function App() {
                         playSynthesizedSound('click')
                         setIsFormExpanded(false)
                       }}
-                      className="px-4 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white transition-colors"
+                      className="interactive-control px-4 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white transition-colors"
                     >
                       Collapse
                     </button>
                     <button
                       type="submit"
-                      className="flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-zinc-700 to-zinc-500 text-white border border-zinc-650 shadow-[0_0_15px_rgba(255,255,255,0.04)] hover:shadow-[0_0_25px_rgba(255,255,255,0.08)] transition-all font-heading"
+                      className="interactive-control flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-zinc-700 to-zinc-500 text-white border border-zinc-600 shadow-[0_0_15px_rgba(255,255,255,0.04)] hover:shadow-[0_0_25px_rgba(255,255,255,0.08)] transition-all font-heading"
                     >
                       <Plus className="h-4 w-4" /> ENGAGE TASK
                     </button>
@@ -1272,7 +2009,7 @@ export default function App() {
           </div>
 
           {/* SEARCH, SORT AND FILTER CONTROL BAR */}
-          <div className="glass-card rounded-2xl p-4 flex flex-col md:flex-row gap-4 items-center justify-between">
+          <div className="glass-card motion-card rounded-2xl p-4 flex flex-col md:flex-row gap-4 items-center justify-between">
             {/* Search Input */}
             <div className="relative w-full md:w-80">
               <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" />
@@ -1281,7 +2018,7 @@ export default function App() {
                 placeholder="Search database..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-black/30 border border-white/5 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-zinc-500 transition-colors placeholder:text-gray-500"
+                className="smooth-field w-full bg-black/30 border border-white/5 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-zinc-500 transition-colors placeholder:text-gray-500"
               />
             </div>
 
@@ -1296,7 +2033,7 @@ export default function App() {
                       playSynthesizedSound('click')
                       setStatusFilter(status)
                     }}
-                    className={`px-3 py-1.5 rounded-lg capitalize transition-colors font-medium ${
+                    className={`interactive-control px-3 py-1.5 rounded-lg capitalize transition-colors font-medium ${
                       statusFilter === status
                         ? 'bg-zinc-800 text-zinc-200 border border-zinc-700/50 font-semibold'
                         : 'text-gray-400 hover:text-gray-200'
@@ -1314,7 +2051,7 @@ export default function App() {
                   playSynthesizedSound('click')
                   setPriorityFilter(e.target.value)
                 }}
-                className="bg-black/30 border border-white/5 rounded-xl px-3 py-2 text-xs text-gray-300 focus:outline-none focus:border-zinc-500 font-mono"
+                className="smooth-field bg-black/30 border border-white/5 rounded-xl px-3 py-2 text-xs text-gray-300 focus:outline-none focus:border-zinc-500 font-mono"
               >
                 <option value="all" className="bg-[#121020]">All Priorities</option>
                 <option value="high" className="bg-[#121020]">High Priority</option>
@@ -1327,9 +2064,9 @@ export default function App() {
                 value={sortBy}
                 onChange={(e) => {
                   playSynthesizedSound('click')
-                  setSortBy(e.target.value as any)
+                  setSortBy(e.target.value as SortBy)
                 }}
-                className="bg-black/30 border border-white/5 rounded-xl px-3 py-2 text-xs text-gray-300 focus:outline-none focus:border-zinc-500 font-mono"
+                className="smooth-field bg-black/30 border border-white/5 rounded-xl px-3 py-2 text-xs text-gray-300 focus:outline-none focus:border-zinc-500 font-mono"
               >
                 <option value="createdAt" className="bg-[#121020]">Date Created</option>
                 <option value="dueDate" className="bg-[#121020]">Due Date</option>
@@ -1338,10 +2075,95 @@ export default function App() {
             </div>
           </div>
 
+          {/* FOCUS INTELLIGENCE */}
+          <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
+            <div className="glass-card motion-card rounded-2xl p-5 xl:col-span-2">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h4 className="flex items-center gap-2 text-base font-semibold text-white font-heading">
+                    <Brain className="h-4 w-4 text-zinc-400" />
+                    Focus Intelligence
+                  </h4>
+                  <p className="mt-1 text-xs text-zinc-500">Pressure score: {intelligence.pressure}</p>
+                </div>
+                <span className={`rounded-xl border px-3 py-1.5 text-xs font-bold uppercase tracking-wide ${
+                  intelligence.grade === 'Critical'
+                    ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
+                    : intelligence.grade === 'Elevated'
+                      ? 'border-zinc-400/30 bg-zinc-400/10 text-zinc-200'
+                      : 'border-white/10 bg-white/5 text-zinc-300'
+                }`}>
+                  {intelligence.grade}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 font-mono text-[10px] uppercase">
+                <div className="stat-tile rounded-xl border border-white/5 p-3 text-center">
+                  <span className="block text-xl font-bold text-white font-heading">{intelligence.dueToday}</span>
+                  <span className="text-zinc-500">Today</span>
+                </div>
+                <div className="stat-tile rounded-xl border border-white/5 p-3 text-center">
+                  <span className="block text-xl font-bold text-white font-heading">{intelligence.dueThisWeek}</span>
+                  <span className="text-zinc-500">7 Days</span>
+                </div>
+                <div className="stat-tile rounded-xl border border-white/5 p-3 text-center">
+                  <span className="block text-xl font-bold text-white font-heading">{intelligence.blockedBySubtasks}</span>
+                  <span className="text-zinc-500">Stalled</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="glass-card motion-card rounded-2xl p-5 xl:col-span-3">
+              <div className="mb-4 flex items-center justify-between">
+                <h4 className="flex items-center gap-2 text-base font-semibold text-white font-heading">
+                  <Target className="h-4 w-4 text-zinc-400" />
+                  Recommended Next
+                </h4>
+                <span className="text-[10px] font-mono uppercase tracking-wide text-zinc-500">Auto ranked</span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {focusQueue.length === 0 ? (
+                  <div className="md:col-span-3 rounded-xl border border-white/5 bg-white/2 p-4 text-sm text-zinc-500">
+                    No active tasks need attention.
+                  </div>
+                ) : (
+                  focusQueue.map((task, index) => {
+                    const taskCat = categories.find((cat) => cat.id === task.category)
+                    return (
+                      <button
+                        key={task.id}
+                        type="button"
+                        onClick={() => {
+                          playSynthesizedSound('click')
+                          setExpandedTaskId(task.id)
+                        }}
+                        className="interactive-control rounded-xl border border-white/5 bg-white/2 p-4 text-left hover:border-white/15"
+                      >
+                        <div className="mb-3 flex items-center justify-between">
+                          <span className="rounded-lg bg-zinc-800 px-2 py-1 text-[10px] font-bold text-zinc-300">#{index + 1}</span>
+                          <span className="text-[10px] uppercase text-zinc-500">{task.priority}</span>
+                        </div>
+                        <h5 className="line-clamp-2 text-sm font-semibold text-white">{task.title}</h5>
+                        <div className="mt-3 flex items-center justify-between text-[10px] text-zinc-500">
+                          <span className="flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: taskCat?.color || '#9ca3af' }} />
+                            {taskCat?.name || task.category}
+                          </span>
+                          <span>{task.dueDate ? new Date(task.dueDate).toLocaleDateString([], { month: 'short', day: 'numeric' }) : 'No due date'}</span>
+                        </div>
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+
           {/* ACTIVE CATEGORY BANNER */}
           {selectedCategoryFilter !== 'all' && activeCategory && (
             <div
-              className="px-4 py-2 rounded-xl flex items-center justify-between text-xs animate-slide-up"
+              className="motion-pop px-4 py-2 rounded-xl flex items-center justify-between text-xs"
               style={{
                 backgroundColor: `${activeCategory.color}15`,
                 border: `1px solid ${activeCategory.color}35`
@@ -1358,7 +2180,28 @@ export default function App() {
                   playSynthesizedSound('click')
                   setSelectedCategoryFilter('all')
                 }}
-                className="text-gray-400 hover:text-white transition-colors"
+                className="icon-control text-gray-400 hover:text-white transition-colors"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
+          {dueDateFilter && (
+            <div className="motion-pop px-4 py-2 rounded-xl flex items-center justify-between text-xs border border-white/10 bg-white/5">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-white font-mono uppercase tracking-wider">Calendar Date:</span>
+                <span className="px-2 py-0.5 rounded bg-zinc-200 text-zinc-950 font-bold">
+                  {new Date(dueDateFilter).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                </span>
+              </div>
+              <button
+                onClick={() => {
+                  playSynthesizedSound('click')
+                  setDueDateFilter(null)
+                }}
+                className="icon-control text-gray-400 hover:text-white transition-colors"
+                aria-label="Clear calendar date filter"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -1368,7 +2211,7 @@ export default function App() {
           {/* --- TASKS LIST CHECKLIST FEED --- */}
           <div className="space-y-4 min-h-[300px]">
             {filteredTasks.length === 0 ? (
-              <div className="glass-card rounded-2xl p-12 text-center text-gray-500 flex flex-col items-center justify-center gap-3">
+              <div className="glass-card motion-pop rounded-2xl p-12 text-center text-gray-500 flex flex-col items-center justify-center gap-3">
                 <AlertCircle className="h-8 w-8 text-zinc-500/40" />
                 <div>
                   <p className="font-semibold text-gray-400">No active tasks in current sector.</p>
@@ -1398,13 +2241,13 @@ export default function App() {
                     glow: 'shadow-[0_0_12px_rgba(255,255,255,0.06)]'
                   },
                   medium: {
-                    border: 'border-l-4 border-l-zinc-550',
+                    border: 'border-l-4 border-l-zinc-500',
                     badge: 'bg-zinc-900 text-zinc-400 border border-zinc-800/60',
                     dot: 'bg-zinc-500',
                     glow: 'shadow-[0_0_12px_rgba(255,255,255,0.03)]'
                   },
                   low: {
-                    border: 'border-l-4 border-l-zinc-750',
+                    border: 'border-l-4 border-l-zinc-700',
                     badge: 'bg-zinc-950 text-zinc-500 border border-zinc-900/60',
                     dot: 'bg-zinc-700',
                     glow: ''
@@ -1423,7 +2266,7 @@ export default function App() {
                 return (
                   <div
                     key={task.id}
-                    className={`glass-card rounded-2xl overflow-hidden transition-all duration-300 animate-slide-up ${
+                    className={`glass-card motion-card task-card rounded-2xl overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                       currentPriorityStyle.border
                     } ${currentPriorityStyle.glow} ${
                       task.completed ? 'opacity-65 hover:opacity-100' : ''
@@ -1435,18 +2278,18 @@ export default function App() {
                         playSynthesizedSound('click')
                         setExpandedTaskId(isExpanded ? null : task.id)
                       }}
-                      className="p-5 flex items-center justify-between gap-4 cursor-pointer select-none"
+                      className="p-5 flex items-center justify-between gap-4 cursor-pointer select-none transition-colors duration-300 hover:bg-white/[0.025]"
                     >
                       <div className="flex items-center gap-4 flex-1 min-w-0">
                         {/* Checkbox circle with custom click sparks */}
                         <button
                           onClick={(e) => handleToggleComplete(e, task.id)}
-                          className="flex-shrink-0 text-gray-500 hover:text-zinc-400 transition-colors focus:outline-none"
+                          className="icon-control flex-shrink-0 text-gray-500 hover:text-zinc-400 transition-colors focus:outline-none"
                         >
                           {task.completed ? (
                             <CheckCircle2 className="h-6 w-6 text-zinc-200 filter drop-shadow-[0_0_8px_rgba(255,255,255,0.4)]" />
                           ) : (
-                            <Circle className="h-6 w-6 text-gray-650 hover:border-zinc-500 transition-all hover:scale-105" />
+                            <Circle className="h-6 w-6 text-gray-600 hover:text-zinc-400 transition-all hover:scale-105" />
                           )}
                         </button>
 
@@ -1457,7 +2300,7 @@ export default function App() {
                               value={editTitle}
                               onClick={(e) => e.stopPropagation()}
                               onChange={(e) => setEditTitle(e.target.value)}
-                              className="bg-black/40 border border-white/10 rounded-lg px-2.5 py-1 text-sm text-white w-full max-w-md focus:outline-none focus:border-zinc-500"
+                              className="smooth-field bg-black/40 border border-white/10 rounded-lg px-2.5 py-1 text-sm text-white w-full max-w-md focus:outline-none focus:border-zinc-500"
                             />
                           ) : (
                             <h3
@@ -1477,7 +2320,7 @@ export default function App() {
                               {taskCat ? taskCat.name : task.category}
                             </span>
                             
-                            <span>•</span>
+                            <span aria-hidden="true" className="text-gray-600">/</span>
 
                             {/* Priority tag */}
                             <span className="capitalize">{task.priority} Priority</span>
@@ -1485,7 +2328,7 @@ export default function App() {
                             {/* Subtasks Progress tag */}
                             {hasSubtasks && (
                               <>
-                                <span>•</span>
+                                <span aria-hidden="true" className="text-gray-600">/</span>
                                 <span className="text-zinc-400">
                                   {completedSubs}/{task.subtasks.length} Subtasks ({subtasksProgress}%)
                                 </span>
@@ -1502,7 +2345,7 @@ export default function App() {
                           <div
                             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono border ${
                               isOverdue
-                                ? 'bg-rose-500/10 text-rose-450 border-rose-500/20 shadow-[0_0_10px_rgba(244,63,94,0.1)]'
+                                ? 'bg-rose-500/10 text-rose-400 border-rose-500/20 shadow-[0_0_10px_rgba(244,63,94,0.1)]'
                                 : 'bg-white/2 text-gray-400 border-white/5'
                             }`}
                           >
@@ -1519,26 +2362,26 @@ export default function App() {
 
                         {/* Expand Icon */}
                         {isExpanded ? (
-                          <ChevronUp className="h-4 w-4 text-gray-400" />
+                          <ChevronUp className="task-chevron h-4 w-4 text-gray-400 transition-transform duration-300" />
                         ) : (
-                          <ChevronDown className="h-4 w-4 text-gray-400" />
+                          <ChevronDown className="task-chevron h-4 w-4 text-gray-400 transition-transform duration-300" />
                         )}
                       </div>
                     </div>
 
                     {/* Detailed Expanded Area */}
                     {isExpanded && (
-                      <div className="px-5 pb-5 border-t border-white/5 bg-black/15 space-y-4">
+                      <div className="task-details px-5 pb-5 border-t border-white/5 bg-black/15 space-y-4">
                         {/* Task Editing Area */}
                         {isEditing ? (
-                          <div className="space-y-4 pt-4 animate-slide-up">
+                          <div className="reveal-panel space-y-4 pt-4">
                             <div>
                               <label className="block text-[10px] font-mono text-gray-400 mb-1.5 uppercase">Task Description</label>
                               <textarea
                                 value={editDesc}
                                 onChange={(e) => setEditDesc(e.target.value)}
                                 rows={2}
-                                className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-zinc-500 resize-none"
+                                className="smooth-field w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-zinc-500 resize-none"
                               />
                             </div>
 
@@ -1555,7 +2398,7 @@ export default function App() {
                                         playSynthesizedSound('click')
                                         setEditPriority(p)
                                       }}
-                                      className={`flex-1 py-1 rounded text-xs font-semibold capitalize border font-mono ${
+                                      className={`interactive-control flex-1 py-1 rounded text-xs font-semibold capitalize border font-mono ${
                                         editPriority === p
                                           ? p === 'high'
                                             ? 'bg-zinc-300/10 border-zinc-400 text-white shadow-[0_0_10px_rgba(255,255,255,0.05)]'
@@ -1580,7 +2423,7 @@ export default function App() {
                                     playSynthesizedSound('click')
                                     setEditCategory(e.target.value)
                                   }}
-                                  className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono"
+                                  className="smooth-field w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono"
                                 >
                                   {categories.filter(c => !c.disabled || c.id === task.category).map((cat) => (
                                     <option key={cat.id} value={cat.id} className="bg-zinc-950 text-white">
@@ -1597,7 +2440,7 @@ export default function App() {
                                   type="date"
                                   value={editDueDate}
                                   onChange={(e) => setEditDueDate(e.target.value)}
-                                  className="w-full bg-black/40 border border-white/10 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono"
+                                  className="smooth-field w-full bg-black/40 border border-white/10 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-zinc-500 font-mono"
                                 />
                               </div>
                             </div>
@@ -1608,13 +2451,13 @@ export default function App() {
                                   playSynthesizedSound('click')
                                   setEditingTaskId(null)
                                 }}
-                                className="px-3 py-1.5 border border-white/10 text-gray-400 hover:text-white rounded-lg text-xs font-mono"
+                                className="interactive-control px-3 py-1.5 border border-white/10 text-gray-400 hover:text-white rounded-lg text-xs font-mono"
                               >
                                 Cancel
                               </button>
                               <button
                                 onClick={() => handleSaveEdit(task.id)}
-                                className="px-3.5 py-1.5 bg-zinc-700 hover:bg-zinc-650 text-white rounded-lg text-xs font-mono font-semibold"
+                                className="interactive-control px-3.5 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg text-xs font-mono font-semibold"
                               >
                                 Save Changes
                               </button>
@@ -1658,12 +2501,12 @@ export default function App() {
                                   {task.subtasks.map((sub) => (
                                     <div
                                       key={sub.id}
-                                      className="flex items-center justify-between p-2.5 bg-white/2 border border-white/5 rounded-xl text-xs hover:border-white/10 transition-colors"
+                                      className="interactive-control flex items-center justify-between p-2.5 bg-white/2 border border-white/5 rounded-xl text-xs hover:border-white/10 transition-colors"
                                     >
                                       <div className="flex items-center gap-3">
                                         <button
                                           onClick={() => handleToggleSubtask(task.id, sub.id)}
-                                          className="text-gray-500 hover:text-zinc-400 transition-colors focus:outline-none"
+                                          className="icon-control text-gray-500 hover:text-zinc-400 transition-colors focus:outline-none"
                                         >
                                           {sub.completed ? (
                                             <CheckCircle2 className="h-4.5 w-4.5 text-zinc-300 fill-zinc-300/10" />
@@ -1677,7 +2520,7 @@ export default function App() {
                                       </div>
                                       <button
                                         onClick={() => handleDeleteSubtask(task.id, sub.id)}
-                                        className="text-gray-500 hover:text-zinc-400 transition-colors"
+                                        className="icon-control text-gray-500 hover:text-zinc-400 transition-colors"
                                       >
                                         <X className="h-4 w-4" />
                                       </button>
@@ -1692,12 +2535,12 @@ export default function App() {
                                     placeholder="Formulate subtask..."
                                     value={newSubtaskTitle}
                                     onChange={(e) => setNewSubtaskTitle(e.target.value)}
-                                    className="flex-1 bg-black/40 border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500 placeholder:text-gray-600"
+                                    className="smooth-field flex-1 bg-black/40 border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-500 placeholder:text-gray-600"
                                   />
                                   <button
                                     type="button"
                                     onClick={() => handleAddSubtask(task.id)}
-                                    className="px-3.5 py-1.5 bg-zinc-900 text-zinc-300 border border-zinc-700/40 hover:bg-zinc-800 rounded-lg text-xs font-mono font-semibold transition-colors"
+                                    className="interactive-control px-3.5 py-1.5 bg-zinc-900 text-zinc-300 border border-zinc-700/40 hover:bg-zinc-800 rounded-lg text-xs font-mono font-semibold transition-colors"
                                   >
                                     ADD
                                   </button>
@@ -1715,14 +2558,14 @@ export default function App() {
                                       playSynthesizedSound('click')
                                       startEditing(task)
                                     }}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/5 bg-white/2 hover:bg-white/5 hover:text-white transition-colors"
+                                    className="interactive-control flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/5 bg-white/2 hover:bg-white/5 hover:text-white transition-colors"
                                   >
                                     <Undo className="h-3.5 w-3.5 text-zinc-400" />
                                     <span>Edit Data</span>
                                   </button>
                                   <button
                                     onClick={(e) => handleDeleteTask(e, task.id)}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-950/20 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition-colors"
+                                    className="interactive-control flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-950/20 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition-colors"
                                   >
                                     <Trash2 className="h-3.5 w-3.5" />
                                     <span>Purge Task</span>
@@ -1744,7 +2587,7 @@ export default function App() {
         {/* --- LEVEL UP SUCCESS OVERLAY MODAL --- */}
         {showLevelUp && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md px-4 animate-fade-in">
-            <div className="relative glass-card max-w-md w-full rounded-3xl p-8 border-zinc-500/40 shadow-[0_0_50px_rgba(255,255,255,0.15)] text-center space-y-6 animate-slide-up">
+            <div className="relative glass-card motion-pop max-w-md w-full rounded-3xl p-8 border-zinc-500/40 shadow-[0_0_50px_rgba(255,255,255,0.15)] text-center space-y-6">
               
               {/* Sparkles icon background glow */}
               <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-tr from-zinc-700 to-zinc-400 shadow-[0_0_30px_rgba(255,255,255,0.15)]">
@@ -1771,7 +2614,7 @@ export default function App() {
                   playSynthesizedSound('click')
                   setShowLevelUp(false)
                 }}
-                className="w-full py-3.5 bg-gradient-to-r from-zinc-700 to-zinc-500 hover:from-zinc-600 hover:to-zinc-500 border border-zinc-700 text-white rounded-2xl font-semibold shadow-lg transition-all"
+                className="interactive-control w-full py-3.5 bg-gradient-to-r from-zinc-700 to-zinc-500 hover:from-zinc-600 hover:to-zinc-500 border border-zinc-700 text-white rounded-2xl font-semibold shadow-lg transition-all"
               >
                 ACKNOWLEDGE MATRIX
               </button>
@@ -1782,7 +2625,7 @@ export default function App() {
         {/* --- CUSTOM RIGHT-CLICK CATEGORY CONTEXT MENU --- */}
         {contextMenu && contextMenu.visible && (
           <div
-            className="fixed z-50 bg-zinc-950/90 border border-white/10 rounded-xl py-1.5 min-w-[140px] shadow-[0_10px_25px_-5px_rgba(0,0,0,0.8),_0_0_15px_rgba(255,255,255,0.03)] backdrop-blur-md animate-slide-up"
+            className="fixed z-50 bg-zinc-950/90 border border-white/10 rounded-xl py-1.5 min-w-[140px] shadow-[0_10px_25px_-5px_rgba(0,0,0,0.8),_0_0_15px_rgba(255,255,255,0.03)] backdrop-blur-md motion-pop"
             style={{
               left: (() => {
                 let left = contextMenu.x
@@ -1809,7 +2652,7 @@ export default function App() {
                 setRenamingName(cat ? cat.name : '')
                 setContextMenu(null)
               }}
-              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5 hover:text-white transition-colors font-mono flex items-center gap-2"
+              className="interactive-control w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5 hover:text-white transition-colors font-mono flex items-center gap-2"
             >
               Rename
             </button>
@@ -1820,7 +2663,7 @@ export default function App() {
                     handleToggleDisableCategory(contextMenu.categoryId)
                     setContextMenu(null)
                   }}
-                  className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5 hover:text-white transition-colors font-mono flex items-center gap-2"
+                  className="interactive-control w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/5 hover:text-white transition-colors font-mono flex items-center gap-2"
                 >
                   {categories.find((c) => c.id === contextMenu.categoryId)?.disabled ? 'Enable' : 'Disable'}
                 </button>
@@ -1830,7 +2673,7 @@ export default function App() {
                     handleDeleteCategory(contextMenu.categoryId)
                     setContextMenu(null)
                   }}
-                  className="w-full text-left px-3 py-1.5 text-xs text-rose-455 hover:bg-rose-955/20 hover:text-rose-400 transition-colors font-mono flex items-center gap-2"
+                  className="interactive-control w-full text-left px-3 py-1.5 text-xs text-rose-400 hover:bg-rose-950/20 hover:text-rose-300 transition-colors font-mono flex items-center gap-2"
                 >
                   Delete
                 </button>
