@@ -39,7 +39,6 @@ import { KanbanBoard } from './components/KanbanBoard'
 import { AnalyticsPanel } from './components/AnalyticsPanel'
 import { CommandPalette } from './components/CommandPalette'
 import { FocusSpace } from './components/FocusSpace'
-import { AiAssistant } from './components/AiAssistant'
 
 interface WindowWithWebkitAudioContext extends Window {
   webkitAudioContext?: typeof AudioContext
@@ -859,26 +858,6 @@ export default function App() {
 
 
   // --- SUBTASKS HANDLERS ---
-  const handleAddMultipleSubtasks = (taskId: string, subtaskTitles: string[]) => {
-    playSynthesizedSound('click')
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id === taskId) {
-          const newSubs = subtaskTitles.map((title) => ({
-            id: Math.random().toString(36).substring(2, 9),
-            title,
-            completed: false
-          }))
-          return {
-            ...t,
-            subtasks: [...t.subtasks, ...newSubs]
-          }
-        }
-        return t
-      })
-    )
-  }
-
   const handleAddSubtask = (taskId: string) => {
     if (!newSubtaskTitle.trim()) return
     playSynthesizedSound('click')
@@ -2690,14 +2669,6 @@ export default function App() {
                                   </button>
                                 </div>
 
-                                {/* AI Subtask Assistant */}
-                                <div className="mt-4">
-                                  <AiAssistant
-                                    taskTitle={task.title}
-                                    taskDescription={task.description}
-                                    onAddSubtasks={(subtasks) => handleAddMultipleSubtasks(task.id, subtasks)}
-                                  />
-                                </div>
                               </div>
 
                               {/* Core Action row */}
