@@ -4,6 +4,14 @@ export interface SubTask {
   completed: boolean
 }
 
+export interface Category {
+  id: string
+  name: string
+  color: string
+  glowColor: string
+  disabled?: boolean
+}
+
 export interface Task {
   id: string
   title: string
@@ -12,6 +20,7 @@ export interface Task {
   category: string
   dueDate: string
   completed: boolean
+  inProgress?: boolean
   subtasks: SubTask[]
   xpReward: number
   createdAt: string

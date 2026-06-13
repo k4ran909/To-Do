@@ -34,16 +34,12 @@ import {
   CheckCheck
 } from 'lucide-react'
 import { FlickeringGrid } from '@/components/ui/FlickeringGrid'
-import type { Task, SubTask, UserProfile } from './types'
-
-// Category type for customization
-interface Category {
-  id: string
-  name: string
-  color: string // Hex or color name
-  glowColor: string
-  disabled?: boolean
-}
+import type { Task, SubTask, UserProfile, Category } from './types'
+import { KanbanBoard } from './components/KanbanBoard'
+import { AnalyticsPanel } from './components/AnalyticsPanel'
+import { CommandPalette } from './components/CommandPalette'
+import { FocusSpace } from './components/FocusSpace'
+import { AiAssistant } from './components/AiAssistant'
 
 interface WindowWithWebkitAudioContext extends Window {
   webkitAudioContext?: typeof AudioContext
@@ -352,6 +348,10 @@ export default function App() {
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all')
   const [dueDateFilter, setDueDateFilter] = useState<string | null>(null)
   const [sortBy, setSortBy] = useState<SortBy>('createdAt')
+  const [viewMode, setViewMode] = useState<'list' | 'kanban' | 'analytics'>('list')
+  const [showCommandPalette, setShowCommandPalette] = useState<boolean>(false)
+  const [showFocusMode, setShowFocusMode] = useState<boolean>(false)
+  const [focusTaskId, setFocusTaskId] = useState<string | null>(null)
 
   // Expanded/Editing Task Details State
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
@@ -605,6 +605,19 @@ export default function App() {
     }
   }, [])
 
+  // Global keyboard shortcut for Command Palette (Ctrl+K / Cmd+K)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        playSynthesizedSound('click')
+        setShowCommandPalette((prev) => !prev)
+      }
+    }
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [])
+
   // Animate particles (sparks)
   useEffect(() => {
     if (sparks.length === 0) return
@@ -749,8 +762,8 @@ export default function App() {
     setIsFormExpanded(false)
   }
 
-  const handleToggleComplete = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation()
+  const handleToggleComplete = (e: React.MouseEvent | null | undefined, id: string) => {
+    if (e) e.stopPropagation()
     const task = tasks.find((t) => t.id === id)
     if (!task) return
 
@@ -759,7 +772,11 @@ export default function App() {
 
     if (newCompleted) {
       // Complete: spawn particle explosion at the mouse cursor coordinate
-      emitSparks(e.clientX, e.clientY, '#ffffff')
+      if (e) {
+        emitSparks(e.clientX, e.clientY, '#ffffff')
+      } else {
+        emitSparks(window.innerWidth / 2, window.innerHeight / 2, '#ffffff')
+      }
       handleXPGain(task.xpReward)
       updateStreak()
     } else {
@@ -776,15 +793,92 @@ export default function App() {
     )
   }
 
-  const handleDeleteTask = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation()
+  const handleDeleteTask = (e: React.MouseEvent | null | undefined, id: string) => {
+    if (e) e.stopPropagation()
     playSynthesizedSound('delete')
     setTasks((prev) => prev.filter((t) => t.id !== id))
     if (expandedTaskId === id) setExpandedTaskId(null)
     if (editingTaskId === id) setEditingTaskId(null)
   }
 
+  const handleTaskColumnChange = (taskId: string, targetColumn: 'todo' | 'in_progress' | 'completed') => {
+    const task = tasks.find((t) => t.id === taskId)
+    if (!task) return
+
+    const prevCompleted = task.completed
+
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id === taskId) {
+          if (targetColumn === 'completed') {
+            return { ...t, completed: true, inProgress: false }
+          } else if (targetColumn === 'in_progress') {
+            return { ...t, completed: false, inProgress: true }
+          } else {
+            return { ...t, completed: false, inProgress: false }
+          }
+        }
+        return t
+      })
+    )
+
+    if (targetColumn === 'completed' && !prevCompleted) {
+      playSynthesizedSound('complete')
+      emitSparks(window.innerWidth / 2, window.innerHeight / 2, '#ffffff')
+      handleXPGain(task.xpReward)
+      updateStreak()
+    } else if (targetColumn !== 'completed' && prevCompleted) {
+      playSynthesizedSound('click')
+      setProfile((prev) => ({
+        ...prev,
+        xp: Math.max(0, prev.xp - task.xpReward),
+        totalCompletedTasks: Math.max(0, prev.totalCompletedTasks - 1)
+      }))
+    } else {
+      playSynthesizedSound('click')
+    }
+  }
+
+  const handleQuickAddTask = (title: string) => {
+    playSynthesizedSound('click')
+    const newTask: Task = {
+      id: Math.random().toString(36).substring(2, 9),
+      title,
+      description: '',
+      priority: 'medium',
+      category: 'inbox',
+      dueDate: '',
+      completed: false,
+      subtasks: [],
+      xpReward: 15,
+      createdAt: new Date().toISOString()
+    }
+    setTasks((prev) => [newTask, ...prev])
+  }
+
+
+
   // --- SUBTASKS HANDLERS ---
+  const handleAddMultipleSubtasks = (taskId: string, subtaskTitles: string[]) => {
+    playSynthesizedSound('click')
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id === taskId) {
+          const newSubs = subtaskTitles.map((title) => ({
+            id: Math.random().toString(36).substring(2, 9),
+            title,
+            completed: false
+          }))
+          return {
+            ...t,
+            subtasks: [...t.subtasks, ...newSubs]
+          }
+        }
+        return t
+      })
+    )
+  }
+
   const handleAddSubtask = (taskId: string) => {
     if (!newSubtaskTitle.trim()) return
     playSynthesizedSound('click')
@@ -1895,7 +1989,57 @@ export default function App() {
         {/* MAIN TASKS BOARD (8 columns) */}
         <section className="lg:col-span-8 flex flex-col gap-6">
 
-          {/* DYNAMIC TASK CREATION PANEL */}
+          {/* VIEW TOGGLE TABS */}
+          <div className="flex items-center justify-between border-b border-white/5 pb-2">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  playSynthesizedSound('click')
+                  setViewMode('list')
+                }}
+                className={`px-4 py-2 text-xs font-bold font-mono tracking-wider uppercase rounded-xl transition-all ${
+                  viewMode === 'list'
+                    ? 'bg-white text-zinc-950 shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                    : 'text-zinc-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                Feed List
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  playSynthesizedSound('click')
+                  setViewMode('kanban')
+                }}
+                className={`px-4 py-2 text-xs font-bold font-mono tracking-wider uppercase rounded-xl transition-all ${
+                  viewMode === 'kanban'
+                    ? 'bg-white text-zinc-950 shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                    : 'text-zinc-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                Kanban Board
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  playSynthesizedSound('click')
+                  setViewMode('analytics')
+                }}
+                className={`px-4 py-2 text-xs font-bold font-mono tracking-wider uppercase rounded-xl transition-all ${
+                  viewMode === 'analytics'
+                    ? 'bg-white text-zinc-950 shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                    : 'text-zinc-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                Flow Analytics
+              </button>
+            </div>
+          </div>
+
+          {viewMode === 'list' && (
+            <>
+              {/* DYNAMIC TASK CREATION PANEL */}
           <div className="glass-card motion-card rounded-2xl p-6 relative overflow-hidden">
             <form onSubmit={handleAddTask} className="space-y-4">
               <div className="relative">
@@ -2545,6 +2689,15 @@ export default function App() {
                                     ADD
                                   </button>
                                 </div>
+
+                                {/* AI Subtask Assistant */}
+                                <div className="mt-4">
+                                  <AiAssistant
+                                    taskTitle={task.title}
+                                    taskDescription={task.description}
+                                    onAddSubtasks={(subtasks) => handleAddMultipleSubtasks(task.id, subtasks)}
+                                  />
+                                </div>
                               </div>
 
                               {/* Core Action row */}
@@ -2552,6 +2705,18 @@ export default function App() {
                                 <span className="text-gray-500">Engaged: {new Date(task.createdAt).toLocaleString()}</span>
                                 
                                 <div className="flex gap-2">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      playSynthesizedSound('click')
+                                      setFocusTaskId(task.id)
+                                      setShowFocusMode(true)
+                                    }}
+                                    className="interactive-control flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white text-zinc-950 font-semibold transition-colors"
+                                  >
+                                    <Clock className="h-3.5 w-3.5" />
+                                    <span>Sync Focus</span>
+                                  </button>
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation()
@@ -2581,8 +2746,72 @@ export default function App() {
                 })
               )}
             </div>
+            </>
+          )}
+
+          {viewMode === 'kanban' && (
+            <KanbanBoard
+              tasks={filteredTasks}
+              categories={categories}
+              onComplete={(id) => handleToggleComplete(null, id)}
+              onDelete={(id) => handleDeleteTask(null, id)}
+              onEdit={(id) => {
+                const task = tasks.find((t) => t.id === id)
+                if (task) startEditing(task)
+              }}
+              onExpand={(id) => setExpandedTaskId(expandedTaskId === id ? null : id)}
+              onTaskDrop={handleTaskColumnChange}
+            />
+          )}
+
+          {viewMode === 'analytics' && (
+            <AnalyticsPanel
+              tasks={tasks}
+              categories={categories}
+            />
+          )}
           </section>
         </main>
+
+        <CommandPalette
+          isOpen={showCommandPalette}
+          onClose={() => setShowCommandPalette(false)}
+          tasks={tasks}
+          categories={categories}
+          onSelectTask={(id) => {
+            playSynthesizedSound('click')
+            setExpandedTaskId(id)
+            setViewMode('list')
+          }}
+          onAddTask={handleQuickAddTask}
+          onToggleSettings={() => {
+            playSynthesizedSound('click')
+            setShowSettings((prev) => !prev)
+          }}
+          onClearCompleted={handleClearCompleted}
+          onSelectCategoryFilter={(id) => {
+            playSynthesizedSound('click')
+            setSelectedCategoryFilter(id)
+          }}
+          onSelectViewMode={(mode) => {
+            playSynthesizedSound('click')
+            setViewMode(mode)
+          }}
+          onLogout={handleSignOut}
+        />
+
+        <FocusSpace
+          isOpen={showFocusMode}
+          onClose={() => {
+            setShowFocusMode(false)
+            setFocusTaskId(null)
+          }}
+          task={tasks.find((t) => t.id === focusTaskId) || null}
+          onRewardXP={(amount) => {
+            handleXPGain(amount)
+            updateStreak()
+          }}
+        />
 
         {/* --- LEVEL UP SUCCESS OVERLAY MODAL --- */}
         {showLevelUp && (
